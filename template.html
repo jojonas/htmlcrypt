@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script>
+        (function() {
+            const iterations = {{ .KDFIterations }};
+            const salt = Uint8Array.fromBase64("{{ .KDFSalt | base64 }}");
+            const keyLen = {{ .KeyLen }};
+            const ciphertext = Uint8Array.fromBase64("{{ .Ciphertext | base64 }}");
+            const iv = Uint8Array.fromBase64("{{ .GCMNonce | base64 }}");
+
+            function base64ToBytes(b64) {
+                const bin = atob(b64);
+                const bytes = new Uint8Array(bin.length);
+                for (let i = 0; i < bin.length; i++) {
+                    bytes[i] = bin.charCodeAt(i);
+                }
+                return bytes;
+            }
+
+            async function main() {
+                let plaintext = null;
+
+                while (!plaintext) {
+                    const password = prompt("Password?");
+                    if (password === null) {
+                        return;
+                    }
+
+                    const key = await deriveKey(password, salt);
+
+                    try {
+                        plaintext = await window.crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext);
+                    } catch (error) {
+                        if (error.name === "OperationError") {
+                            // decryption failed
+                            continue;
+                        } else {
+                            throw error;
+                        }
+                    }
+                }
+                
+                const decoder = new TextDecoder();
+                const headerSize = new DataView(plaintext).getUint32(0, false);
+                const header = JSON.parse(decoder.decode(plaintext.slice(4, 4+headerSize)));
+                console.log(header); // intentional, can stay in 
+
+                let body = plaintext.slice(4+headerSize);
+                if (header.compression) {
+                    body = await new Response(new Blob([body])
+                        .stream()
+                        .pipeThrough(new DecompressionStream(header.compression)))
+                        .arrayBuffer();
+                }
+
+                if (header.size != body.byteLength) {
+                    throw new Error("corrupted plaintext")
+                }
+
+                document.title = header.filename;
+
+                if (header.download) {
+                    const url = URL.createObjectURL(new Blob([body], { type: header.mimeType }));
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = header.filename;
+                    a.type = header.mimeType;
+                    a.click();
+                    return;
+                } 
+                
+                if (header.mimeType.startsWith("text/html")) {
+                    const html = new TextDecoder().decode(body);
+                    document.open(header.mimeType);
+                    document.write(html);
+                    document.close()
+                } else {
+                    const url = URL.createObjectURL(new Blob([body], { type: header.mimeType }));
+                    window.location.assign(url);
+                }
+            }
+
+            async function deriveKey(password, salt) {
+                const encoder = new TextEncoder();
+                const keyMaterial = await window.crypto.subtle.importKey(
+                    "raw",
+                    encoder.encode(password),
+                    "PBKDF2",
+                    false,
+                    ["deriveKey"]
+                );
+                const key = await window.crypto.subtle.deriveKey(
+                    {
+                        name: "PBKDF2",
+                        salt: salt,
+                        iterations: iterations,
+                        hash: "SHA-256"
+                    },
+                    keyMaterial,
+                    { name: "AES-GCM", length: 8*keyLen },
+                    false,
+                    ["decrypt"]
+                );
+                return key;
+            }
+
+            document.addEventListener("DOMContentLoaded", () => main().catch(e => { document.body.textContent = "Decryption failed: " + e }));
+        })();
+    </script>
+</head>
+<body>
+    This document is encrypted.
+</body>
+</html>
